@@ -22,8 +22,8 @@ FREETYPEINC = /usr/include/freetype2
 #MANPREFIX = ${PREFIX}/man
 
 # includes and libs
-INCS = -I${X11INC} -I${FREETYPEINC}
-LIBS = -L${X11LIB} -lX11 ${XINERAMALIBS} ${FREETYPELIBS}
+INCS = -I${X11INC} -I${FREETYPEINC} `pkg-config guile-3.0 --cflags`
+LIBS = -L${X11LIB} -lX11 ${XINERAMALIBS} ${FREETYPELIBS} `pkg-config guile-3.0 --libs`
 
 # flags
 CPPFLAGS = -D_DEFAULT_SOURCE -D_BSD_SOURCE -D_XOPEN_SOURCE=700L -DVERSION=\"${VERSION}\" ${XINERAMAFLAGS}

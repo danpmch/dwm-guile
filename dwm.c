@@ -22,6 +22,7 @@
  */
 #include <errno.h>
 #include <locale.h>
+#include <libguile.h>
 #include <signal.h>
 #include <stdarg.h>
 #include <stdio.h>
@@ -98,17 +99,73 @@ struct Client {
 	Window win;
 };
 
-typedef struct {
+typedef struct Key Key;
+struct Key {
 	unsigned int mod;
 	KeySym keysym;
 	void (*func)(const Arg *);
 	const Arg arg;
-} Key;
+};
 
-typedef struct {
+typedef struct Layout Layout;
+struct Layout {
 	const char *symbol;
-	void (*arrange)(Monitor *);
-} Layout;
+
+  // must be a function that takes scm_monitor as argument
+  SCM arrange;
+
+  Layout *next;
+};
+
+Layout *layouts = NULL;
+void add_layout(const char *symbol, SCM arrange) {
+  Layout *l = malloc(sizeof(Layout));
+  l->symbol = symbol;
+  l->arrange = arrange;
+  l->next = NULL;
+
+  if (layouts == NULL) {
+    layouts = l;
+  } else {
+    Layout *curr = layouts;
+    while (curr->next != NULL) curr = curr->next;
+    curr->next = l;
+  }
+}
+
+static SCM
+scm_add_layout(SCM scm_symbol, SCM scm_func) {
+  char *symbol = scm_to_locale_string(scm_symbol);
+  add_layout(symbol, scm_func);
+  return SCM_BOOL_T;
+}
+
+void
+print_layouts() {
+  Layout* l = layouts;
+  printf("Layouts:\n");
+  while (l != NULL) {
+    printf("  %s\n", l->symbol);
+    l = l->next;
+  }
+}
+
+Layout* find_layout(const char *symbol) {
+  printf("Finding layout %s\n", symbol);
+  fflush(stdout);
+  Layout *current = layouts;
+  while (current != NULL) {
+    if (strcmp(current->symbol, symbol) == 0) {
+      printf("Found layout %s\n", symbol);
+      fflush(stdout);
+      return current;
+    }
+    current = current->next;
+  }
+  printf("Couldn't find layout %s\n", symbol);
+  fflush(stdout);
+  return NULL;
+}
 
 struct Monitor {
 	char ltsymbol[16];
@@ -130,6 +187,33 @@ struct Monitor {
 	Window barwin;
 	const Layout *lt[2];
 };
+
+static SCM monitor_type;
+void
+scm_define_monitor() {
+  SCM name = scm_from_utf8_symbol("Monitor");
+  SCM slots = scm_list_1(scm_from_utf8_symbol("data"));
+  monitor_type = scm_make_foreign_object_type(name, slots, NULL);
+}
+
+SCM
+scm_from_monitor(Monitor* m) {
+  printf("Wrapping monitor %p", m);
+  fflush(stdout);
+
+  SCM monitor = scm_make_foreign_object_1(monitor_type, m);
+
+  printf("Wrapped monitor %p", m);
+  fflush(stdout);
+  return monitor;
+}
+
+Monitor*
+scm_to_monitor(SCM m) {
+  scm_assert_foreign_object_type(monitor_type, m);
+  Monitor* monitor = scm_foreign_object_ref(m, 0);
+  return monitor;
+}
 
 typedef struct {
 	const char *class;
@@ -200,6 +284,7 @@ static void setclientstate(Client *c, long state);
 static void setfocus(Client *c);
 static void setfullscreen(Client *c, int fullscreen);
 static void setlayout(const Arg *arg);
+static void setlayout_byname(const Arg *arg);
 static void setmfact(const Arg *arg);
 static void setup(void);
 static void seturgent(Client *c, int urg);
@@ -232,6 +317,9 @@ static int xerror(Display *dpy, XErrorEvent *ee);
 static int xerrordummy(Display *dpy, XErrorEvent *ee);
 static int xerrorstart(Display *dpy, XErrorEvent *ee);
 static void zoom(const Arg *arg);
+
+SCM scm_tile(SCM monitor);
+SCM scm_monocle(SCM monitor);
 
 /* variables */
 static const char broken[] = "broken";
@@ -396,8 +484,13 @@ void
 arrangemon(Monitor *m)
 {
 	strncpy(m->ltsymbol, m->lt[m->sellt]->symbol, sizeof m->ltsymbol);
-	if (m->lt[m->sellt]->arrange)
-		m->lt[m->sellt]->arrange(m);
+
+  SCM arrange = m->lt[m->sellt]->arrange;
+  if (scm_is_false(arrange)) return;
+
+  printf("Calling layout %s\n", m->lt[m->sellt]->symbol);
+  fflush(stdout);
+  scm_call_1(arrange, scm_from_monitor(m));
 }
 
 void
@@ -633,16 +726,21 @@ Monitor *
 createmon(void)
 {
 	Monitor *m;
+  printf("Creating monitor\n");
+  fflush(stdout);
 
-	m = ecalloc(1, sizeof(Monitor));
-	m->tagset[0] = m->tagset[1] = 1;
-	m->mfact = mfact;
-	m->nmaster = nmaster;
-	m->showbar = showbar;
-	m->topbar = topbar;
-	m->lt[0] = &layouts[0];
-	m->lt[1] = &layouts[1 % LENGTH(layouts)];
-	strncpy(m->ltsymbol, layouts[0].symbol, sizeof m->ltsymbol);
+  m = ecalloc(1, sizeof(Monitor));
+  m->tagset[0] = m->tagset[1] = 1;
+  m->mfact = mfact;
+  m->nmaster = nmaster;
+  m->showbar = showbar;
+  m->topbar = topbar;
+
+  if (layouts == NULL)
+    die("No layouts defined!");
+	m->lt[0] = layouts;
+	m->lt[1] = layouts->next == NULL ? layouts : layouts->next;
+	strncpy(m->ltsymbol, layouts->symbol, sizeof m->ltsymbol);
 	return m;
 }
 
@@ -1124,6 +1222,13 @@ monocle(Monitor *m)
 		resize(c, m->wx, m->wy, m->ww - 2 * c->bw, m->wh - 2 * c->bw, 0);
 }
 
+SCM
+scm_monocle(SCM m) {
+  Monitor* monitor = scm_to_monitor(m);
+  monocle(monitor);
+  return SCM_UNSPECIFIED;
+}
+
 void
 motionnotify(XEvent *e)
 {
@@ -1520,6 +1625,15 @@ setlayout(const Arg *arg)
 		drawbar(selmon);
 }
 
+void
+setlayout_byname(const Arg *arg) {
+  const char* symbol = arg->v;
+  Layout* l = find_layout(symbol);
+  if (l == NULL) return;
+  Arg a = {.v = l};
+  setlayout(&a);
+}
+
 /* arg > 1.0 will set mfact absolutely */
 void
 setmfact(const Arg *arg)
@@ -1552,17 +1666,44 @@ setup(void)
 	/* clean up any zombies (inherited from .xinitrc etc) immediately */
 	while (waitpid(-1, NULL, WNOHANG) > 0);
 
-	/* init screen */
-	screen = DefaultScreen(dpy);
-	sw = DisplayWidth(dpy, screen);
-	sh = DisplayHeight(dpy, screen);
-	root = RootWindow(dpy, screen);
-	drw = drw_create(dpy, screen, root, sw, sh);
-	if (!drw_fontset_create(drw, fonts, LENGTH(fonts)))
-		die("no fonts could be loaded.");
-	lrpad = drw->fonts->h;
-	bh = drw->fonts->h + 2;
-	updategeom();
+  printf("cleaned zombies...\n");
+  fflush(stdout);
+
+  printf("initing guile...\n");
+  fflush(stdout);
+  scm_init_guile();
+
+  scm_define_monitor();
+
+  scm_c_define_gsubr("add-layout", 2, 0, 0, scm_add_layout);
+  scm_c_define_gsubr("tile-layout", 1, 0, 0, scm_tile);
+  scm_c_define_gsubr("monocle-layout", 1, 0, 0, scm_monocle);
+  scm_c_primitive_load("/home/dan/pkg/dwm-scheme/scheme/config.scm");
+
+  printf("initing screen...\n");
+  fflush(stdout);
+
+  /* init screen */
+  screen = DefaultScreen(dpy);
+  printf("initing root window...\n");
+  fflush(stdout);
+  sw = DisplayWidth(dpy, screen);
+  sh = DisplayHeight(dpy, screen);
+  root = RootWindow(dpy, screen);
+
+  printf("initing draw create...\n");
+  fflush(stdout);
+  drw = drw_create(dpy, screen, root, sw, sh);
+  if (!drw_fontset_create(drw, fonts, LENGTH(fonts)))
+    die("no fonts could be loaded.");
+  lrpad = drw->fonts->h;
+  bh = drw->fonts->h + 2;
+  printf("updating geom...\n");
+  fflush(stdout);
+  updategeom();
+
+  printf("initing atoms...\n");
+  fflush(stdout);
 	/* init atoms */
 	utf8string = XInternAtom(dpy, "UTF8_STRING", False);
 	wmatom[WMProtocols] = XInternAtom(dpy, "WM_PROTOCOLS", False);
@@ -1577,30 +1718,48 @@ setup(void)
 	netatom[NetWMFullscreen] = XInternAtom(dpy, "_NET_WM_STATE_FULLSCREEN", False);
 	netatom[NetWMWindowType] = XInternAtom(dpy, "_NET_WM_WINDOW_TYPE", False);
 	netatom[NetWMWindowTypeDialog] = XInternAtom(dpy, "_NET_WM_WINDOW_TYPE_DIALOG", False);
-	netatom[NetClientList] = XInternAtom(dpy, "_NET_CLIENT_LIST", False);
-	/* init cursors */
-	cursor[CurNormal] = drw_cur_create(drw, XC_left_ptr);
-	cursor[CurResize] = drw_cur_create(drw, XC_sizing);
-	cursor[CurMove] = drw_cur_create(drw, XC_fleur);
-	/* init appearance */
-	scheme = ecalloc(LENGTH(colors), sizeof(Clr *));
-	for (i = 0; i < LENGTH(colors); i++)
-		scheme[i] = drw_scm_create(drw, colors[i], 3);
-	/* init bars */
-	updatebars();
-	updatestatus();
-	/* supporting window for NetWMCheck */
-	wmcheckwin = XCreateSimpleWindow(dpy, root, 0, 0, 1, 1, 0, 0, 0);
-	XChangeProperty(dpy, wmcheckwin, netatom[NetWMCheck], XA_WINDOW, 32,
-		PropModeReplace, (unsigned char *) &wmcheckwin, 1);
-	XChangeProperty(dpy, wmcheckwin, netatom[NetWMName], utf8string, 8,
-		PropModeReplace, (unsigned char *) "dwm", 3);
-	XChangeProperty(dpy, root, netatom[NetWMCheck], XA_WINDOW, 32,
-		PropModeReplace, (unsigned char *) &wmcheckwin, 1);
-	/* EWMH support per view */
-	XChangeProperty(dpy, root, netatom[NetSupported], XA_ATOM, 32,
-		PropModeReplace, (unsigned char *) netatom, NetLast);
-	XDeleteProperty(dpy, root, netatom[NetClientList]);
+        netatom[NetClientList] = XInternAtom(dpy, "_NET_CLIENT_LIST", False);
+
+        printf("initing cursors...\n");
+        fflush(stdout);
+        /* init cursors */
+        cursor[CurNormal] = drw_cur_create(drw, XC_left_ptr);
+        cursor[CurResize] = drw_cur_create(drw, XC_sizing);
+        cursor[CurMove] = drw_cur_create(drw, XC_fleur);
+
+        printf("initing appearance...\n");
+        fflush(stdout);
+        /* init appearance */
+        scheme = ecalloc(LENGTH(colors), sizeof(Clr *));
+        for (i = 0; i < LENGTH(colors); i++)
+          scheme[i] = drw_scm_create(drw, colors[i], 3);
+
+        printf("initing bars...\n");
+        fflush(stdout);
+        /* init bars */
+        updatebars();
+        updatestatus();
+
+        printf("initing netwmcheck...\n");
+        fflush(stdout);
+        /* supporting window for NetWMCheck */
+        wmcheckwin = XCreateSimpleWindow(dpy, root, 0, 0, 1, 1, 0, 0, 0);
+        XChangeProperty(dpy, wmcheckwin, netatom[NetWMCheck], XA_WINDOW, 32,
+                        PropModeReplace, (unsigned char *)&wmcheckwin, 1);
+        XChangeProperty(dpy, wmcheckwin, netatom[NetWMName], utf8string, 8,
+                        PropModeReplace, (unsigned char *)"dwm", 3);
+        XChangeProperty(dpy, root, netatom[NetWMCheck], XA_WINDOW, 32,
+                        PropModeReplace, (unsigned char *)&wmcheckwin, 1);
+
+        printf("initing ewmh support...\n");
+        fflush(stdout);
+        /* EWMH support per view */
+        XChangeProperty(dpy, root, netatom[NetSupported], XA_ATOM, 32,
+                        PropModeReplace, (unsigned char *)netatom, NetLast);
+        XDeleteProperty(dpy, root, netatom[NetClientList]);
+
+        printf("initing events...\n");
+        fflush(stdout);
 	/* select events */
 	wa.cursor = cursor[CurNormal]->cursor;
 	wa.event_mask = SubstructureRedirectMask|SubstructureNotifyMask
@@ -1709,6 +1868,21 @@ tile(Monitor *m)
 			if (ty + HEIGHT(c) < m->wh)
 				ty += HEIGHT(c);
 		}
+}
+
+SCM
+scm_tile(SCM monitor) {
+  printf("Unwraping monitor\n");
+  fflush(stdout);
+  Monitor *m = scm_to_monitor(monitor);
+
+  printf("Calling tile\n");
+  fflush(stdout);
+  tile(m);
+
+  printf("Returning successfully\n");
+  fflush(stdout);
+  return SCM_UNSPECIFIED;
 }
 
 void
@@ -1869,76 +2043,98 @@ updategeom(void)
 	int dirty = 0;
 
 #ifdef XINERAMA
-	if (XineramaIsActive(dpy)) {
-		int i, j, n, nn;
-		Client *c;
-		Monitor *m;
-		XineramaScreenInfo *info = XineramaQueryScreens(dpy, &nn);
-		XineramaScreenInfo *unique = NULL;
+  printf("Running XINERAMA def\n");
+  fflush(stdout);
+  if (XineramaIsActive(dpy)) {
+    printf("Running XINERAMA code\n");
+    fflush(stdout);
+    int i, j, n, nn;
+    Client *c;
+    Monitor *m;
+    XineramaScreenInfo *info = XineramaQueryScreens(dpy, &nn);
+    XineramaScreenInfo *unique = NULL;
 
-		for (n = 0, m = mons; m; m = m->next, n++);
-		/* only consider unique geometries as separate screens */
-		unique = ecalloc(nn, sizeof(XineramaScreenInfo));
-		for (i = 0, j = 0; i < nn; i++)
-			if (isuniquegeom(unique, j, &info[i]))
-				memcpy(&unique[j++], &info[i], sizeof(XineramaScreenInfo));
-		XFree(info);
-		nn = j;
+    for (n = 0, m = mons; m; m = m->next, n++)
+      ;
+    printf("Unique\n");
+    fflush(stdout);
+    /* only consider unique geometries as separate screens */
+    unique = ecalloc(nn, sizeof(XineramaScreenInfo));
+    for (i = 0, j = 0; i < nn; i++)
+      if (isuniquegeom(unique, j, &info[i]))
+        memcpy(&unique[j++], &info[i], sizeof(XineramaScreenInfo));
+    XFree(info);
+    nn = j;
 
-		/* new monitors if nn > n */
-		for (i = n; i < nn; i++) {
-			for (m = mons; m && m->next; m = m->next);
-			if (m)
-				m->next = createmon();
-			else
-				mons = createmon();
-		}
-		for (i = 0, m = mons; i < nn && m; m = m->next, i++)
-			if (i >= n
-			|| unique[i].x_org != m->mx || unique[i].y_org != m->my
-			|| unique[i].width != m->mw || unique[i].height != m->mh)
-			{
-				dirty = 1;
-				m->num = i;
-				m->mx = m->wx = unique[i].x_org;
-				m->my = m->wy = unique[i].y_org;
-				m->mw = m->ww = unique[i].width;
-				m->mh = m->wh = unique[i].height;
-				updatebarpos(m);
-			}
-		/* removed monitors if n > nn */
-		for (i = nn; i < n; i++) {
-			for (m = mons; m && m->next; m = m->next);
-			while ((c = m->clients)) {
-				dirty = 1;
-				m->clients = c->next;
-				detachstack(c);
-				c->mon = mons;
-				attach(c);
-				attachstack(c);
-			}
-			if (m == selmon)
-				selmon = mons;
-			cleanupmon(m);
-		}
-		free(unique);
-	} else
+    printf("New monitors\n");
+    fflush(stdout);
+    /* new monitors if nn > n */
+    for (i = n; i < nn; i++) {
+      for (m = mons; m && m->next; m = m->next)
+        ;
+      if (m)
+        m->next = createmon();
+      else
+        mons = createmon();
+    }
+    printf("Check barpos\n");
+    fflush(stdout);
+    for (i = 0, m = mons; i < nn && m; m = m->next, i++)
+      if (i >= n || unique[i].x_org != m->mx || unique[i].y_org != m->my ||
+          unique[i].width != m->mw || unique[i].height != m->mh) {
+        dirty = 1;
+        m->num = i;
+        m->mx = m->wx = unique[i].x_org;
+        m->my = m->wy = unique[i].y_org;
+        m->mw = m->ww = unique[i].width;
+        m->mh = m->wh = unique[i].height;
+        updatebarpos(m);
+      }
+    printf("Removed monitors\n");
+    fflush(stdout);
+    /* removed monitors if n > nn */
+    for (i = nn; i < n; i++) {
+      for (m = mons; m && m->next; m = m->next)
+        ;
+      while ((c = m->clients)) {
+        dirty = 1;
+        m->clients = c->next;
+        detachstack(c);
+        c->mon = mons;
+        attach(c);
+        attachstack(c);
+      }
+      if (m == selmon)
+        selmon = mons;
+      cleanupmon(m);
+    }
+    printf("Free unique\n");
+    fflush(stdout);
+    free(unique);
+  } else
 #endif /* XINERAMA */
-	{ /* default monitor setup */
-		if (!mons)
-			mons = createmon();
-		if (mons->mw != sw || mons->mh != sh) {
-			dirty = 1;
-			mons->mw = mons->ww = sw;
-			mons->mh = mons->wh = sh;
-			updatebarpos(mons);
-		}
-	}
-	if (dirty) {
-		selmon = mons;
-		selmon = wintomon(root);
-	}
-	return dirty;
+  {    /* default monitor setup */
+		if (!mons) {
+      printf("Creating mon...\n");
+      fflush(stdout);
+      mons = createmon();
+                }
+                if (mons->mw != sw || mons->mh != sh) {
+                  dirty = 1;
+                  mons->mw = mons->ww = sw;
+                  mons->mh = mons->wh = sh;
+                  printf("Updating bar position...\n");
+                  fflush(stdout);
+                  updatebarpos(mons);
+                }
+  }
+        if (dirty) {
+          printf("Calling wintomon...\n");
+          fflush(stdout);
+          selmon = mons;
+          selmon = wintomon(root);
+        }
+        return dirty;
 }
 
 void
@@ -2142,23 +2338,35 @@ zoom(const Arg *arg)
 int
 main(int argc, char *argv[])
 {
-	if (argc == 2 && !strcmp("-v", argv[1]))
-		die("dwm-"VERSION);
-	else if (argc != 1)
-		die("usage: dwm [-v]");
-	if (!setlocale(LC_CTYPE, "") || !XSupportsLocale())
-		fputs("warning: no locale support\n", stderr);
-	if (!(dpy = XOpenDisplay(NULL)))
-		die("dwm: cannot open display");
-	checkotherwm();
-	setup();
+  printf("Booting dwm...\n");
+  fflush(stdout);
+  if (argc == 2 && !strcmp("-v", argv[1]))
+    die("dwm-" VERSION);
+  else if (argc != 1)
+    die("usage: dwm [-v]");
+  if (!setlocale(LC_CTYPE, "") || !XSupportsLocale())
+    fputs("warning: no locale support\n", stderr);
+  if (!(dpy = XOpenDisplay(NULL)))
+    die("dwm: cannot open display");
+  checkotherwm();
+  printf("Setting up dwm...\n");
+  fflush(stdout);
+  setup();
 #ifdef __OpenBSD__
-	if (pledge("stdio rpath proc exec", NULL) == -1)
-		die("pledge");
+  if (pledge("stdio rpath proc exec", NULL) == -1)
+    die("pledge");
 #endif /* __OpenBSD__ */
-	scan();
-	run();
-	cleanup();
-	XCloseDisplay(dpy);
-	return EXIT_SUCCESS;
+  printf("Scanning...\n");
+  fflush(stdout);
+  scan();
+  printf("Entering main loop...\n");
+  fflush(stdout);
+  run();
+  printf("stoping DWM...\n");
+  fflush(stdout);
+  cleanup();
+  XCloseDisplay(dpy);
+  printf("exiting DWM...\n");
+  fflush(stdout);
+  return EXIT_SUCCESS;
 }
