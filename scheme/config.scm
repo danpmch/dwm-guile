@@ -5,15 +5,54 @@
   (make-view num layouts)
   view?
   (num view-num)
+  ;; list of two layouts, the first is current and second is previous (for toggling)
   (layouts view-layouts set-view-layouts!))
 
 (define (view-layout view) (car (view-layouts view)))
 (define (swap-layouts view)
-  (set-view-layouts! (reverse (view-layouts view))))
+  (set-view-layouts! view
+                     (reverse (view-layouts view))))
+(define (push-view-layout view layout)
+  (let* ((current-layout (view-layout view))
+         (new-layouts (list layout current-layout)))
+    (set-view-layouts! view new-layouts)))
+
+(define (view-flag view)
+  (let* ((n (view-num view))
+         (zero-based-n (- n 1))
+         (flag (ash 1 zero-based-n)))
+    flag))
 
 (define FLOATING "><>")
 (define TILE "[]=")
 (define MONOCLE "[M]")
+
+(define scm-floating-layout (make-layout FLOATING #f))
+(define scm-tile-layout (make-layout TILE tile-layout))
+(define scm-monocle-layout (make-layout MONOCLE monocle-layout))
+
+;; create a default layout to prevent the underlying C code from
+;; blowing up during initialization
+(add-layout scm-tile-layout)
+
+(define views
+  (map (lambda (n)
+         (make-view n (list scm-tile-layout scm-monocle-layout)))
+       '(1 2 3 4 5 6 7 8 9)))
+
+(define current-view (list-ref views 0))
+(define previous-view current-view)
+
+(define (push-view view)
+  (set! previous-view current-view)
+  (set! current-view view))
+
+(define (switch-to-view v)
+  (let ((layout (view-layout v))
+        (flag (view-flag v)))
+    (push-view v)
+    (set-layout-noarrange layout)
+    (view flag)))
 
 (define font "monospace")
 (define fontsize 12)
@@ -33,10 +72,6 @@
           "-sb" col-cyan
           "-sf" col-gray4)))
 
-(add-layout FLOATING #f)
-(add-layout MONOCLE monocle-layout)
-(add-layout TILE tile-layout)
-
 (define modmask (get-modmask 4))
 
 (define (xkey c)
@@ -54,15 +89,24 @@
 (add-key modmask (get-xkey #\h) (lambda () (adjust-master-factor -0.05)))
 (add-key modmask (get-xkey #\l) (lambda () (adjust-master-factor 0.05)))
 (add-key modmask (get-xkey #\newline) zoom)
-(add-key modmask (get-xkey #\tab) (lambda () (view 0)))
+(add-key modmask (get-xkey #\tab) (lambda () (switch-to-view previous-view)))
 (add-key (logior modmask (get-shiftmask))
          (get-xkey #\c)
          kill-client)
-(add-key modmask (get-xkey #\t) (lambda () (set-layout TILE)))
-(add-key modmask (get-xkey #\f) (lambda () (set-layout FLOATING)))
-(add-key modmask (get-xkey #\m) (lambda () (set-layout MONOCLE)))
 
-(add-key modmask (get-xkey #\space) (lambda () (set-layout "")))
+
+(define (switch-view-layout view layout)
+  (push-view-layout view layout)
+  (set-layout-noarrange layout)
+  (arrange (selected-monitor)))
+
+(add-key modmask (get-xkey #\t) (lambda () (switch-view-layout current-view scm-tile-layout)))
+(add-key modmask (get-xkey #\f) (lambda () (switch-view-layout current-view scm-floating-layout)))
+(add-key modmask (get-xkey #\m) (lambda () (switch-view-layout current-view scm-monocle-layout)))
+(add-key modmask (get-xkey #\space) (lambda ()
+                                      (swap-layouts current-view)
+                                      (set-layout-noarrange (view-layout current-view))
+                                      (arrange (selected-monitor))))
 
 (add-key (logior modmask (get-shiftmask))
          (get-xkey #\space)
@@ -92,7 +136,7 @@
 (define (tag-keys key n)
   (let ((xkey (get-xkey key))
         (flag (ash 1 n)))
-    (add-key modmask xkey (lambda () (view flag)))
+    (add-key modmask xkey (lambda () (switch-to-view (list-ref views n))))
     (add-key (logior modmask (get-controlmask))
              xkey
              (lambda () (toggle-view flag)))

@@ -141,11 +141,8 @@ scm_add_key(SCM scm_mod, SCM scm_keysym, SCM func) {
 
 Key* find_key(unsigned int mod, KeySym keysym) {
   Key* curr = keys;
-  printf("Searching for key %d %d\n", mod, keysym);
   while(curr != NULL) {
-    printf("Checking key: %d %d\n", curr->mod, curr->keysym);
     if (CLEANMASK(curr->mod) == CLEANMASK(mod) && curr->keysym == keysym) {
-      printf("Found key: %d %d\n", curr->mod, curr->keysym);
       return curr;
     }
     curr = curr->next;
@@ -164,28 +161,61 @@ struct Layout {
   Layout *next;
 };
 
-Layout *layouts = NULL;
-void add_layout(const char *symbol, SCM arrange) {
+static SCM layout_type;
+void
+scm_define_layout() {
+  SCM name = scm_from_utf8_symbol("Layout");
+  SCM slots = scm_list_1(scm_from_utf8_symbol("data"));
+  layout_type = scm_make_foreign_object_type(name, slots, NULL);
+}
+
+SCM
+scm_from_layout(Layout* l) {
+  printf("Wrapping layout %p", l);
+  fflush(stdout);
+
+  SCM layout = scm_make_foreign_object_1(layout_type, l);
+
+  printf("Wrapped layout %p", l);
+  fflush(stdout);
+  return layout;
+}
+
+Layout*
+scm_to_layout(SCM l) {
+  scm_assert_foreign_object_type(layout_type, l);
+  Layout* layout = scm_foreign_object_ref(l, 0);
+  return layout;
+}
+
+Layout* make_layout(const char *symbol, SCM arrange) {
   Layout *l = malloc(sizeof(Layout));
   l->symbol = symbol;
   l->arrange = arrange;
   l->next = NULL;
+  return l;
+}
 
+SCM scm_make_layout(SCM scm_symbol, SCM scm_func) {
+  char *symbol = scm_to_locale_string(scm_symbol);
+  Layout *l = make_layout(symbol, scm_func);
+  return scm_from_layout(l);
+}
+
+Layout *layouts = NULL;
+void add_layout(Layout* l) {
   if (layouts == NULL) {
     layouts = l;
   } else {
     l->next = layouts;
     layouts = l;
-    /* Layout *curr = layouts; */
-    /* while (curr->next != NULL) curr = curr->next; */
-    /* curr->next = l; */
   }
 }
 
 static SCM
-scm_add_layout(SCM scm_symbol, SCM scm_func) {
-  char *symbol = scm_to_locale_string(scm_symbol);
-  add_layout(symbol, scm_func);
+scm_add_layout(SCM scm_layout) {
+  Layout* layout = scm_to_layout(scm_layout);
+  add_layout(layout);
   return SCM_BOOL_T;
 }
 
@@ -384,31 +414,37 @@ SCM scm_tagmon(SCM num);
 SCM scm_quit();
 SCM scm_toggleview(SCM num);
 SCM scm_toggletag(SCM num);
+SCM scm_view_noarrange(SCM num);
+SCM scm_setlayout_noarrange(SCM scm_name);
+SCM scm_drawbar(SCM scm_m);
+void scm_define_layout();
+SCM scm_from_layout(Layout *l);
+Layout *scm_to_layout(SCM l);
+SCM scm_make_layout(SCM scm_symbol, SCM scm_func);
 
     /* variables */
     static const char broken[] = "broken";
 static char stext[256];
 static int screen;
-static int sw, sh;           /* X display screen geometry width, height */
-static int bh;               /* bar height */
-static int lrpad;            /* sum of left and right padding for text */
+static int sw, sh; /* X display screen geometry width, height */
+static int bh;     /* bar height */
+static int lrpad;  /* sum of left and right padding for text */
 static int (*xerrorxlib)(Display *, XErrorEvent *);
-static void (*handler[LASTEvent]) (XEvent *) = {
-	[ButtonPress] = buttonpress,
-	[ClientMessage] = clientmessage,
-	[ConfigureRequest] = configurerequest,
-	[ConfigureNotify] = configurenotify,
-	[DestroyNotify] = destroynotify,
-	[EnterNotify] = enternotify,
-	[Expose] = expose,
-	[FocusIn] = focusin,
-	[KeyPress] = keypress,
-	[MappingNotify] = mappingnotify,
-	[MapRequest] = maprequest,
-	[MotionNotify] = motionnotify,
-	[PropertyNotify] = propertynotify,
-	[UnmapNotify] = unmapnotify
-};
+static void (*handler[LASTEvent])(XEvent *) = {
+    [ButtonPress] = buttonpress,
+    [ClientMessage] = clientmessage,
+    [ConfigureRequest] = configurerequest,
+    [ConfigureNotify] = configurenotify,
+    [DestroyNotify] = destroynotify,
+    [EnterNotify] = enternotify,
+    [Expose] = expose,
+    [FocusIn] = focusin,
+    [KeyPress] = keypress,
+    [MappingNotify] = mappingnotify,
+    [MapRequest] = maprequest,
+    [MotionNotify] = motionnotify,
+    [PropertyNotify] = propertynotify,
+    [UnmapNotify] = unmapnotify};
 static Atom wmatom[WMLast], netatom[NetLast];
 static int running = 1;
 static Cur *cursor[CurLast];
@@ -417,6 +453,8 @@ static Display *dpy;
 static Drw *drw;
 static Monitor *mons, *selmon;
 static Window root, wmcheckwin;
+
+SCM scm_selmon() { return scm_from_monitor(selmon); }
 
 /* configuration, allows nested code to access above variables */
 #include "config.h"
@@ -915,6 +953,13 @@ drawbar(Monitor *m)
 	drw_map(drw, m->barwin, 0, 0, m->ww, bh);
 }
 
+SCM
+scm_drawbar(SCM scm_m) {
+  Monitor* m = scm_to_monitor(scm_m);
+  drawbar(m);
+  return SCM_BOOL_T;
+}
+
 void
 drawbars(void)
 {
@@ -1135,7 +1180,7 @@ grabkeys(void)
 {
 	updatenumlockmask();
 	{
-		unsigned int i, j, k;
+		unsigned int j, k;
 		unsigned int modifiers[] = { 0, LockMask, numlockmask, numlockmask|LockMask };
 		int start, end, skip;
 		KeySym *syms;
@@ -1190,17 +1235,13 @@ isuniquegeom(XineramaScreenInfo *unique, size_t n, XineramaScreenInfo *info)
 void
 keypress(XEvent *e)
 {
-	unsigned int i;
 	KeySym keysym;
 	XKeyEvent *ev;
-
-  printf("Processing key event\n");
 
   ev = &e->xkey;
   keysym = XKeycodeToKeysym(dpy, (KeyCode)ev->keycode, 0);
   Key *key = find_key(ev->state, keysym);
   if (key != NULL) {
-    printf("Running key %d %d\n", ev->state, keysym);
     scm_call_0(key->func);
   }
 }
@@ -1720,22 +1761,33 @@ setfullscreen(Client *c, int fullscreen)
 }
 
 void
-setlayout(const Arg *arg)
-{
-	if (!arg || !arg->v || arg->v != selmon->lt[selmon->sellt])
-		selmon->sellt ^= 1;
-	if (arg && arg->v)
-		selmon->lt[selmon->sellt] = (Layout *)arg->v;
-	strncpy(selmon->ltsymbol, selmon->lt[selmon->sellt]->symbol, sizeof selmon->ltsymbol);
-	if (selmon->sel)
-		arrange(selmon);
-	else
-		drawbar(selmon);
+setlayout_noarrange(const Arg *arg) {
+  if (!arg || !arg->v || arg->v != selmon->lt[selmon->sellt])
+    selmon->sellt ^= 1;
+  if (arg && arg->v)
+    selmon->lt[selmon->sellt] = (Layout *)arg->v;
+  strncpy(selmon->ltsymbol, selmon->lt[selmon->sellt]->symbol,
+          sizeof selmon->ltsymbol);
 }
 
 SCM
-scm_setlayout(SCM scm_name) {
-  const char* name = scm_to_locale_string(scm_name);
+scm_setlayout_noarrange(SCM scm_layout) {
+  Layout *l = scm_to_layout(scm_layout);
+  const Arg arg = {.v = l};
+  setlayout_noarrange(&arg);
+  return SCM_BOOL_T;
+}
+
+void setlayout(const Arg *arg) {
+  setlayout_noarrange(arg);
+  if (selmon->sel)
+    arrange(selmon);
+  else
+    drawbar(selmon);
+}
+
+SCM scm_setlayout(SCM scm_name) {
+  char *name = scm_to_locale_string(scm_name);
   const Arg arg = {.v = name};
   setlayout_byname(&arg);
   free(name);
@@ -1900,6 +1952,7 @@ setup(void)
   scm_init_guile();
 
   scm_define_monitor();
+  scm_define_layout();
 
   scm_c_define_gsubr("toggle-bar", 0, 0, 0, scm_togglebar);
   scm_c_define_gsubr("focus-stack", 1, 0, 0, scm_focusstack);
@@ -1907,9 +1960,12 @@ setup(void)
   scm_c_define_gsubr("adjust-master-factor", 1, 0, 0, scm_setmfact);
   scm_c_define_gsubr("zoom", 0, 0, 0, scm_zoom);
   scm_c_define_gsubr("view", 1, 0, 0, scm_view);
+  scm_c_define_gsubr("view-noarrange", 1, 0, 0, scm_view_noarrange);
   scm_c_define_gsubr("kill-client", 0, 0, 0, scm_killclient);
   scm_c_define_gsubr("set-layout", 1, 0, 0, scm_setlayout);
-  scm_c_define_gsubr("add-layout", 2, 0, 0, scm_add_layout);
+  scm_c_define_gsubr("set-layout-noarrange", 1, 0, 0, scm_setlayout_noarrange);
+  scm_c_define_gsubr("make-layout", 2, 0, 0, scm_make_layout);
+  scm_c_define_gsubr("add-layout", 1, 0, 0, scm_add_layout);
   scm_c_define_gsubr("tile-layout", 1, 0, 0, scm_tile);
   scm_c_define_gsubr("monocle-layout", 1, 0, 0, scm_monocle);
   scm_c_define_gsubr("toggle-floating", 0, 0, 0, scm_togglefloating);
@@ -1926,6 +1982,9 @@ setup(void)
   scm_c_define_gsubr("add-key", 3, 0, 0, scm_add_key);
   scm_c_define_gsubr("dmenu-monitor", 0, 0, 0, scm_dmenumon);
   scm_c_define_gsubr("load-config", 0, 0, 0, scm_load_config);
+  scm_c_define_gsubr("selected-monitor", 0, 0, 0, scm_selmon);
+  scm_c_define_gsubr("arrange", 1, 0, 0, scm_arrange);
+  scm_c_define_gsubr("draw-bar", 1, 0, 0, scm_drawbar);
 
   scm_load_config();
 
@@ -2540,20 +2599,28 @@ updatewmhints(Client *c)
 	}
 }
 
-void
-view(const Arg *arg)
-{
-	if ((arg->ui & TAGMASK) == selmon->tagset[selmon->seltags])
-		return;
-	selmon->seltags ^= 1; /* toggle sel tagset */
-	if (arg->ui & TAGMASK)
-		selmon->tagset[selmon->seltags] = arg->ui & TAGMASK;
-	focus(NULL);
-	arrange(selmon);
+void view_noarrange(const Arg *arg) {
+  if ((arg->ui & TAGMASK) == selmon->tagset[selmon->seltags])
+    return;
+  selmon->seltags ^= 1; /* toggle sel tagset */
+  if (arg->ui & TAGMASK)
+    selmon->tagset[selmon->seltags] = arg->ui & TAGMASK;
 }
 
 SCM
-scm_view(SCM num) {
+scm_view_noarrange(SCM num) {
+  const Arg arg = {.ui = scm_to_uint(num)};
+  view_noarrange(&arg);
+  return SCM_BOOL_T;
+}
+
+void view(const Arg *arg) {
+  view_noarrange(arg);
+  focus(NULL);
+  arrange(selmon);
+}
+
+SCM scm_view(SCM num) {
   const Arg arg = {.ui = scm_to_uint(num)};
   view(&arg);
   return SCM_BOOL_T;
