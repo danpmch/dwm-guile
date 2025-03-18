@@ -47,6 +47,7 @@
 
 /* macros */
 #define BUTTONMASK              (ButtonPressMask|ButtonReleaseMask)
+static unsigned int numlockmask = 0;
 #define CLEANMASK(mask)         (mask & ~(numlockmask|LockMask) & (ShiftMask|ControlMask|Mod1Mask|Mod2Mask|Mod3Mask|Mod4Mask|Mod5Mask))
 #define INTERSECT(x,y,w,h,m)    (MAX(0, MIN((x)+(w),(m)->wx+(m)->ww) - MAX((x),(m)->wx)) \
                                * MAX(0, MIN((y)+(h),(m)->wy+(m)->wh) - MAX((y),(m)->wy)))
@@ -103,9 +104,55 @@ typedef struct Key Key;
 struct Key {
 	unsigned int mod;
 	KeySym keysym;
-	void (*func)(const Arg *);
-	const Arg arg;
+
+  // 0-arg SCM function to be invoked when key hit
+  SCM func;
+
+  Key* next;
 };
+
+static Key* keys = NULL;
+
+void
+add_key(unsigned int mod, KeySym keysym, SCM func) {
+  Key* key = ecalloc(1, sizeof(Key));
+  key->mod = mod;
+  key->keysym = keysym;
+  key->func = func;
+
+  if (keys == NULL) {
+    keys = key;
+  } else {
+    key->next = keys;
+    keys = key;
+    /* Key* curr = keys; */
+    /* while (curr->next != NULL) curr = curr->next; */
+    /* curr->next = key; */
+  }
+}
+
+SCM
+scm_add_key(SCM scm_mod, SCM scm_keysym, SCM func) {
+  uint mod = scm_to_uint(scm_mod);
+  KeySym keysym = scm_to_uint(scm_keysym);
+  add_key(mod, keysym, func);
+  return SCM_BOOL_T;
+}
+
+Key* find_key(unsigned int mod, KeySym keysym) {
+  Key* curr = keys;
+  printf("Searching for key %d %d\n", mod, keysym);
+  while(curr != NULL) {
+    printf("Checking key: %d %d\n", curr->mod, curr->keysym);
+    if (CLEANMASK(curr->mod) == CLEANMASK(mod) && curr->keysym == keysym) {
+      printf("Found key: %d %d\n", curr->mod, curr->keysym);
+      return curr;
+    }
+    curr = curr->next;
+  }
+
+  return NULL;
+}
 
 typedef struct Layout Layout;
 struct Layout {
@@ -127,9 +174,11 @@ void add_layout(const char *symbol, SCM arrange) {
   if (layouts == NULL) {
     layouts = l;
   } else {
-    Layout *curr = layouts;
-    while (curr->next != NULL) curr = curr->next;
-    curr->next = l;
+    l->next = layouts;
+    layouts = l;
+    /* Layout *curr = layouts; */
+    /* while (curr->next != NULL) curr = curr->next; */
+    /* curr->next = l; */
   }
 }
 
@@ -320,16 +369,30 @@ static void zoom(const Arg *arg);
 
 SCM scm_tile(SCM monitor);
 SCM scm_monocle(SCM monitor);
+SCM scm_togglebar();
+SCM scm_focusstack(SCM num);
+SCM scm_incnmaster(SCM num);
+SCM scm_setmfact(SCM amount);
+SCM scm_zoom();
+SCM scm_view(SCM num);
+SCM scm_killclient();
+SCM scm_setlayout(SCM scm_name);
+SCM scm_togglefloating();
+SCM scm_tag(SCM num);
+SCM scm_focusmon(SCM num);
+SCM scm_tagmon(SCM num);
+SCM scm_quit();
+SCM scm_toggleview(SCM num);
+SCM scm_toggletag(SCM num);
 
-/* variables */
-static const char broken[] = "broken";
+    /* variables */
+    static const char broken[] = "broken";
 static char stext[256];
 static int screen;
 static int sw, sh;           /* X display screen geometry width, height */
 static int bh;               /* bar height */
 static int lrpad;            /* sum of left and right padding for text */
 static int (*xerrorxlib)(Display *, XErrorEvent *);
-static unsigned int numlockmask = 0;
 static void (*handler[LASTEvent]) (XEvent *) = {
 	[ButtonPress] = buttonpress,
 	[ClientMessage] = clientmessage,
@@ -478,6 +541,13 @@ arrange(Monitor *m)
 		restack(m);
 	} else for (m = mons; m; m = m->next)
 		arrangemon(m);
+}
+
+SCM
+scm_arrange(SCM scm_m) {
+  Monitor* m = scm_to_monitor(scm_m);
+  arrange(m);
+  return SCM_BOOL_T;
 }
 
 void
@@ -932,6 +1002,13 @@ focusmon(const Arg *arg)
 	focus(NULL);
 }
 
+SCM
+scm_focusmon(SCM num) {
+  const Arg arg = {.i = scm_to_int(num)};
+  focusmon(&arg);
+  return SCM_BOOL_T;
+}
+
 void
 focusstack(const Arg *arg)
 {
@@ -956,6 +1033,13 @@ focusstack(const Arg *arg)
 		focus(c);
 		restack(selmon);
 	}
+}
+
+SCM
+scm_focusstack(SCM num) {
+  const Arg arg = {.i = scm_to_int(num)};
+  focusstack(&arg);
+  return SCM_BOOL_T;
 }
 
 Atom
@@ -1061,16 +1145,19 @@ grabkeys(void)
 		syms = XGetKeyboardMapping(dpy, start, end - start + 1, &skip);
 		if (!syms)
 			return;
-		for (k = start; k <= end; k++)
-			for (i = 0; i < LENGTH(keys); i++)
-				/* skip modifier codes, we do that ourselves */
-				if (keys[i].keysym == syms[(k - start) * skip])
-					for (j = 0; j < LENGTH(modifiers); j++)
-						XGrabKey(dpy, k,
-							 keys[i].mod | modifiers[j],
-							 root, True,
-							 GrabModeAsync, GrabModeAsync);
-		XFree(syms);
+		for (k = start; k <= end; k++) {
+      Key* key = keys;
+      while (key != NULL) {
+        /* skip modifier codes, we do that ourselves */
+        if (key->keysym == syms[(k - start) * skip])
+          for (j = 0; j < LENGTH(modifiers); j++)
+            XGrabKey(dpy, k, key->mod | modifiers[j], root, True,
+                     GrabModeAsync, GrabModeAsync);
+        key = key->next;
+      }
+    }
+
+    XFree(syms);
 	}
 }
 
@@ -1079,6 +1166,13 @@ incnmaster(const Arg *arg)
 {
 	selmon->nmaster = MAX(selmon->nmaster + arg->i, 0);
 	arrange(selmon);
+}
+
+SCM
+scm_incnmaster(SCM num) {
+  const Arg arg = {.i = scm_to_int(num)};
+  incnmaster(&arg);
+  return SCM_BOOL_T;
 }
 
 #ifdef XINERAMA
@@ -1100,13 +1194,15 @@ keypress(XEvent *e)
 	KeySym keysym;
 	XKeyEvent *ev;
 
-	ev = &e->xkey;
-	keysym = XKeycodeToKeysym(dpy, (KeyCode)ev->keycode, 0);
-	for (i = 0; i < LENGTH(keys); i++)
-		if (keysym == keys[i].keysym
-		&& CLEANMASK(keys[i].mod) == CLEANMASK(ev->state)
-		&& keys[i].func)
-			keys[i].func(&(keys[i].arg));
+  printf("Processing key event\n");
+
+  ev = &e->xkey;
+  keysym = XKeycodeToKeysym(dpy, (KeyCode)ev->keycode, 0);
+  Key *key = find_key(ev->state, keysym);
+  if (key != NULL) {
+    printf("Running key %d %d\n", ev->state, keysym);
+    scm_call_0(key->func);
+  }
 }
 
 void
@@ -1123,6 +1219,12 @@ killclient(const Arg *arg)
 		XSetErrorHandler(xerror);
 		XUngrabServer(dpy);
 	}
+}
+
+SCM
+scm_killclient() {
+  killclient(NULL);
+  return SCM_BOOL_T;
 }
 
 void
@@ -1363,6 +1465,12 @@ void
 quit(const Arg *arg)
 {
 	running = 0;
+}
+
+SCM
+scm_quit() {
+  quit(NULL);
+  return SCM_BOOL_T;
 }
 
 Monitor *
@@ -1625,6 +1733,15 @@ setlayout(const Arg *arg)
 		drawbar(selmon);
 }
 
+SCM
+scm_setlayout(SCM scm_name) {
+  const char* name = scm_to_locale_string(scm_name);
+  const Arg arg = {.v = name};
+  setlayout_byname(&arg);
+  free(name);
+  return SCM_BOOL_T;
+}
+
 void
 setlayout_byname(const Arg *arg) {
   const char* symbol = arg->v;
@@ -1647,6 +1764,115 @@ setmfact(const Arg *arg)
 		return;
 	selmon->mfact = f;
 	arrange(selmon);
+}
+
+SCM
+scm_setmfact(SCM amount) {
+  const Arg arg = {.f = scm_to_double(amount)};
+  setmfact(&arg);
+  return SCM_BOOL_T;
+}
+
+uint get_xkey(char c) {
+  switch (c) {
+  case 'b': return XK_b;
+  case 'c': return XK_c;
+  case 'd': return XK_d;
+  case 'f': return XK_f;
+  case 'h': return XK_h;
+  case 'i': return XK_i;
+  case 'j': return XK_j;
+  case 'k': return XK_k;
+  case 'l': return XK_l;
+  case 'm': return XK_m;
+  case 'p': return XK_p;
+  case 't': return XK_t;
+  case 'q': return XK_q;
+  case 'r': return XK_r;
+
+  case '0': return XK_0;
+  case '1': return XK_1;
+  case '2': return XK_2;
+  case '3': return XK_3;
+  case '4': return XK_4;
+  case '5': return XK_5;
+  case '6': return XK_6;
+  case '7': return XK_7;
+  case '8': return XK_8;
+  case '9': return XK_9;
+
+  case '.':
+    return XK_period;
+  case ',':
+    return XK_comma;
+  case ' ':
+    return XK_space;
+  case '\t':
+    return XK_Tab;
+  case '\n':
+    return XK_Return;
+  }
+
+  return 0;
+}
+
+SCM scm_xkey(SCM scm_c) {
+  char c = scm_to_char(scm_char_to_integer(scm_c));
+  uint xkey = get_xkey(c);
+  return scm_from_uint(xkey);
+}
+
+uint get_modmask(uint num) {
+  switch (num) {
+  case 1:
+    return Mod1Mask;
+  case 2:
+    return Mod2Mask;
+  case 3:
+    return Mod3Mask;
+  case 4:
+    return Mod4Mask;
+  }
+
+  return 0;
+}
+
+SCM scm_get_modmask(SCM num) {
+  uint n = scm_to_uint(num);
+  return scm_from_uint(get_modmask(n));
+}
+
+uint get_shiftmask() { return ShiftMask; }
+SCM scm_get_shiftmask() { return scm_from_uint(get_shiftmask()); }
+uint get_controlmask() { return ControlMask; }
+SCM scm_get_controlmask() { return scm_from_uint(get_controlmask()); }
+
+char** scm_list_to_string_array(SCM list) {
+  int total = scm_to_int(scm_length(list));
+  char** array = calloc(total, sizeof(char*));
+  for (int i = 0; i < total; i++) {
+    array[i] = scm_to_locale_string(scm_list_ref(list, scm_from_int(i)));
+  }
+  return array;
+}
+
+void free_scm_string_array(char** scm_array, int length) {
+  for (int i = 0; i < length; i++) {
+    free(scm_array[i]);
+  }
+
+  free(scm_array);
+}
+
+SCM
+scm_dmenumon() {
+  char mon = '0' + selmon->num;
+  return scm_from_char(mon);
+}
+
+SCM scm_load_config() {
+  scm_c_primitive_load("/home/dan/pkg/dwm-scheme/scheme/config.scm");
+  return SCM_BOOL_T;
 }
 
 void
@@ -1675,10 +1901,33 @@ setup(void)
 
   scm_define_monitor();
 
+  scm_c_define_gsubr("toggle-bar", 0, 0, 0, scm_togglebar);
+  scm_c_define_gsubr("focus-stack", 1, 0, 0, scm_focusstack);
+  scm_c_define_gsubr("increase-num-master", 1, 0, 0, scm_incnmaster);
+  scm_c_define_gsubr("adjust-master-factor", 1, 0, 0, scm_setmfact);
+  scm_c_define_gsubr("zoom", 0, 0, 0, scm_zoom);
+  scm_c_define_gsubr("view", 1, 0, 0, scm_view);
+  scm_c_define_gsubr("kill-client", 0, 0, 0, scm_killclient);
+  scm_c_define_gsubr("set-layout", 1, 0, 0, scm_setlayout);
   scm_c_define_gsubr("add-layout", 2, 0, 0, scm_add_layout);
   scm_c_define_gsubr("tile-layout", 1, 0, 0, scm_tile);
   scm_c_define_gsubr("monocle-layout", 1, 0, 0, scm_monocle);
-  scm_c_primitive_load("/home/dan/pkg/dwm-scheme/scheme/config.scm");
+  scm_c_define_gsubr("toggle-floating", 0, 0, 0, scm_togglefloating);
+  scm_c_define_gsubr("tag", 1, 0, 0, scm_tag);
+  scm_c_define_gsubr("focus-monitor", 1, 0, 0, scm_focusmon);
+  scm_c_define_gsubr("tag-monitor", 1, 0, 0, scm_tagmon);
+  scm_c_define_gsubr("quit", 0, 0, 0, scm_quit);
+  scm_c_define_gsubr("toggle-view", 1, 0, 0, scm_toggleview);
+  scm_c_define_gsubr("toggle-tag", 1, 0, 0, scm_toggletag);
+  scm_c_define_gsubr("get-xkey", 1, 0, 0, scm_xkey);
+  scm_c_define_gsubr("get-modmask", 1, 0, 0, scm_get_modmask);
+  scm_c_define_gsubr("get-shiftmask", 0, 0, 0, scm_get_shiftmask);
+  scm_c_define_gsubr("get-controlmask", 0, 0, 0, scm_get_controlmask);
+  scm_c_define_gsubr("add-key", 3, 0, 0, scm_add_key);
+  scm_c_define_gsubr("dmenu-monitor", 0, 0, 0, scm_dmenumon);
+  scm_c_define_gsubr("load-config", 0, 0, 0, scm_load_config);
+
+  scm_load_config();
 
   printf("initing screen...\n");
   fflush(stdout);
@@ -1694,7 +1943,12 @@ setup(void)
   printf("initing draw create...\n");
   fflush(stdout);
   drw = drw_create(dpy, screen, root, sw, sh);
-  if (!drw_fontset_create(drw, fonts, LENGTH(fonts)))
+
+  SCM scm_fonts = scm_variable_ref(scm_c_lookup("fonts"));
+  int total_fonts = scm_to_int(scm_length(scm_fonts));
+  char** fonts = scm_list_to_string_array(scm_fonts);
+
+  if (!drw_fontset_create(drw, (const char**) fonts, total_fonts))
     die("no fonts could be loaded.");
   lrpad = drw->fonts->h;
   bh = drw->fonts->h + 2;
@@ -1802,26 +2056,27 @@ showhide(Client *c)
 	}
 }
 
-void
-spawn(const Arg *arg)
-{
-	struct sigaction sa;
+void exec_cmd(char** argv) {
+  struct sigaction sa;
+  if (fork() == 0) {
+    if (dpy)
+      close(ConnectionNumber(dpy));
+    setsid();
 
-	if (arg->v == dmenucmd)
-		dmenumon[0] = '0' + selmon->num;
-	if (fork() == 0) {
-		if (dpy)
-			close(ConnectionNumber(dpy));
-		setsid();
+    sigemptyset(&sa.sa_mask);
+    sa.sa_flags = 0;
+    sa.sa_handler = SIG_DFL;
+    sigaction(SIGCHLD, &sa, NULL);
 
-		sigemptyset(&sa.sa_mask);
-		sa.sa_flags = 0;
-		sa.sa_handler = SIG_DFL;
-		sigaction(SIGCHLD, &sa, NULL);
+    execvp(argv[0], argv);
+    die("dwm: execvp '%s' failed:", argv[0]);
+  }
+}
 
-		execvp(((char **)arg->v)[0], (char **)arg->v);
-		die("dwm: execvp '%s' failed:", ((char **)arg->v)[0]);
-	}
+void spawn(const Arg *arg) {
+  if (arg->v == dmenucmd)
+    dmenumon[0] = '0' + selmon->num;
+  exec_cmd((char **) arg->v);
 }
 
 void
@@ -1834,12 +2089,26 @@ tag(const Arg *arg)
 	}
 }
 
+SCM
+scm_tag(SCM num) {
+  const Arg arg = {.ui = scm_to_uint(num)};
+  tag(&arg);
+  return SCM_BOOL_T;
+}
+
 void
 tagmon(const Arg *arg)
 {
 	if (!selmon->sel || !mons->next)
 		return;
 	sendmon(selmon->sel, dirtomon(arg->i));
+}
+
+SCM
+scm_tagmon(SCM num) {
+  const Arg arg = {.i = scm_to_int(num)};
+  tagmon(&arg);
+  return SCM_BOOL_T;
 }
 
 void
@@ -1894,6 +2163,12 @@ togglebar(const Arg *arg)
 	arrange(selmon);
 }
 
+SCM
+scm_togglebar() {
+  togglebar(NULL);
+  return SCM_BOOL_T;
+}
+
 void
 togglefloating(const Arg *arg)
 {
@@ -1906,6 +2181,12 @@ togglefloating(const Arg *arg)
 		resize(selmon->sel, selmon->sel->x, selmon->sel->y,
 			selmon->sel->w, selmon->sel->h, 0);
 	arrange(selmon);
+}
+
+SCM
+scm_togglefloating() {
+  togglefloating(NULL);
+  return SCM_BOOL_T;
 }
 
 void
@@ -1923,6 +2204,13 @@ toggletag(const Arg *arg)
 	}
 }
 
+SCM
+scm_toggletag(SCM num) {
+  const Arg arg = {.ui = scm_to_uint(num)};
+  toggletag(&arg);
+  return SCM_BOOL_T;
+}
+
 void
 toggleview(const Arg *arg)
 {
@@ -1933,6 +2221,13 @@ toggleview(const Arg *arg)
 		focus(NULL);
 		arrange(selmon);
 	}
+}
+
+SCM
+scm_toggleview(SCM num) {
+  const Arg arg = {.ui = scm_to_uint(num)};
+  toggleview(&arg);
+  return SCM_BOOL_T;
 }
 
 void
@@ -2257,6 +2552,13 @@ view(const Arg *arg)
 	arrange(selmon);
 }
 
+SCM
+scm_view(SCM num) {
+  const Arg arg = {.ui = scm_to_uint(num)};
+  view(&arg);
+  return SCM_BOOL_T;
+}
+
 Client *
 wintoclient(Window w)
 {
@@ -2333,6 +2635,12 @@ zoom(const Arg *arg)
 	if (c == nexttiled(selmon->clients) && !(c = nexttiled(c->next)))
 		return;
 	pop(c);
+}
+
+SCM
+scm_zoom() {
+  zoom(NULL);
+  return SCM_BOOL_T;
 }
 
 int
