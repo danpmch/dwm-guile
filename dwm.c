@@ -268,15 +268,13 @@ struct Monitor {
 };
 
 static SCM monitor_type;
-void
-scm_define_monitor() {
+void scm_define_monitor() {
   SCM name = scm_from_utf8_symbol("Monitor");
   SCM slots = scm_list_1(scm_from_utf8_symbol("data"));
   monitor_type = scm_make_foreign_object_type(name, slots, NULL);
 }
 
-SCM
-scm_from_monitor(Monitor* m) {
+SCM scm_from_monitor(Monitor *m) {
   printf("Wrapping monitor %p", m);
   fflush(stdout);
 
@@ -287,21 +285,56 @@ scm_from_monitor(Monitor* m) {
   return monitor;
 }
 
-Monitor*
-scm_to_monitor(SCM m) {
+Monitor *scm_to_monitor(SCM m) {
   scm_assert_foreign_object_type(monitor_type, m);
-  Monitor* monitor = scm_foreign_object_ref(m, 0);
+  Monitor *monitor = scm_foreign_object_ref(m, 0);
   return monitor;
 }
 
 typedef struct {
-	const char *class;
-	const char *instance;
-	const char *title;
-	unsigned int tags;
-	int isfloating;
-	int monitor;
+  /* const char *class; */
+  /* const char *instance; */
+  /* const char *title; */
+  unsigned int tags;
+  int isfloating;
+  int monitor;
 } Rule;
+
+static SCM rule_type;
+void
+scm_define_type(SCM* type, const char* c_name) {
+  SCM name = scm_from_utf8_symbol(c_name);
+  SCM slots = scm_list_1(scm_from_utf8_symbol("data"));
+  *type = scm_make_foreign_object_type(name, slots, NULL);
+}
+
+SCM
+scm_from_type(SCM type, void* instance) {
+  SCM scm = scm_make_foreign_object_1(type, instance);
+  return scm;
+}
+
+void*
+scm_to_type(SCM type, SCM scm) {
+  scm_assert_foreign_object_type(type, scm);
+  void* instance = scm_foreign_object_ref(scm, 0);
+  return instance;
+}
+
+SCM scm_make_rule(SCM scm_n, SCM floating, SCM scm_m) {
+  unsigned int n = scm_to_uint(scm_n);
+  unsigned int tags = 1 << (n - 1);
+
+  int f = scm_to_bool(floating);
+  int m = scm_to_int(scm_m);
+
+  Rule* rule = scm_gc_malloc_pointerless(sizeof(Rule), "Rule");
+  rule->tags = tags;
+  rule->isfloating = f;
+  rule->monitor = m;
+
+  return scm_from_type(rule_type, rule);
+}
 
 /* function declarations */
 static void applyrules(Client *c);
@@ -424,7 +457,8 @@ SCM scm_make_layout(SCM scm_symbol, SCM scm_func);
 
     /* variables */
     static const char broken[] = "broken";
-static char stext[256];
+#define STEXT_LENGTH 256
+static char stext[STEXT_LENGTH];
 static int screen;
 static int sw, sh; /* X display screen geometry width, height */
 static int bh;     /* bar height */
@@ -462,13 +496,29 @@ SCM scm_selmon() { return scm_from_monitor(selmon); }
 /* compile-time check if all tags fit into an unsigned int bit array. */
 struct NumTags { char limitexceeded[LENGTH(tags) > 31 ? -1 : 1]; };
 
+Rule *match(const char *class, const char *instance, const char *name) {
+  SCM scm_class = scm_from_locale_string(class);
+  SCM scm_instance = scm_from_locale_string(instance);
+  SCM scm_name = scm_from_locale_string(name);
+  SCM scm_match = scm_variable_ref(scm_c_lookup("match"));
+  SCM scm_rule = scm_call_3(scm_match, scm_class, scm_instance, scm_name);
+
+  if (scm_is_false(scm_rule)) {
+    printf("No rule for '%s' '%s' '%s'\n", class, instance, name);
+    return NULL;
+  }
+
+  printf("Found rule for '%s' '%s' '%s'\n", class, instance, name);
+  Rule *rule = scm_to_type(rule_type, scm_rule);
+  printf("Unwrapped rule for '%s' '%s' '%s'\n", class, instance, name);
+  return rule;
+}
+
 /* function implementations */
 void
 applyrules(Client *c)
 {
 	const char *class, *instance;
-	unsigned int i;
-	const Rule *r;
 	Monitor *m;
 	XClassHint ch = { NULL, NULL };
 
@@ -479,20 +529,18 @@ applyrules(Client *c)
 	class    = ch.res_class ? ch.res_class : broken;
 	instance = ch.res_name  ? ch.res_name  : broken;
 
-	for (i = 0; i < LENGTH(rules); i++) {
-		r = &rules[i];
-		if ((!r->title || strstr(c->name, r->title))
-		&& (!r->class || strstr(class, r->class))
-		&& (!r->instance || strstr(instance, r->instance)))
-		{
-			c->isfloating = r->isfloating;
-			c->tags |= r->tags;
-			for (m = mons; m && m->num != r->monitor; m = m->next);
-			if (m)
-				c->mon = m;
-		}
-	}
-	if (ch.res_class)
+  printf("Checking rules for: '%s' '%s' '%s'\n", class, instance, c->name);
+  const Rule* r = match(class, instance, c->name);
+  if (r != NULL) {
+    c->isfloating = r->isfloating;
+    c->tags |= r->tags;
+    for (m = mons; m && m->num != r->monitor; m = m->next)
+      ;
+    if (m)
+      c->mon = m;
+  }
+
+  if (ch.res_class)
 		XFree(ch.res_class);
 	if (ch.res_name)
 		XFree(ch.res_name);
@@ -900,6 +948,21 @@ dirtomon(int dir)
 	return m;
 }
 
+void update_stext() {
+  SCM scm_bar = scm_variable_ref(scm_c_lookup("bar"));
+  SCM scm_bar_text = scm_call_0(scm_bar);
+  char* bar_text = scm_to_locale_string(scm_bar_text);
+  int total_bar_text = strlen(bar_text);
+  for (int i = 0; i < STEXT_LENGTH; i++) {
+    if (i < total_bar_text)
+      stext[i] = bar_text[i];
+    else
+      stext[i] = 0;
+  }
+
+  free(bar_text);
+}
+
 void
 drawbar(Monitor *m)
 {
@@ -1175,35 +1238,41 @@ grabbuttons(Client *c, int focused)
 	}
 }
 
-void
-grabkeys(void)
-{
-	updatenumlockmask();
-	{
-		unsigned int j, k;
-		unsigned int modifiers[] = { 0, LockMask, numlockmask, numlockmask|LockMask };
-		int start, end, skip;
-		KeySym *syms;
+/* SCM */
+/* scm_grab_key() { */
+/*   XGrabKey(dpy, k, key->mod | modifiers[j], root, True, GrabModeAsync, */
+/*            GrabModeAsync); */
+/*   return SCM_BOOL_T; */
+/* } */
 
-		XUngrabKey(dpy, AnyKey, AnyModifier, root);
-		XDisplayKeycodes(dpy, &start, &end);
-		syms = XGetKeyboardMapping(dpy, start, end - start + 1, &skip);
-		if (!syms)
-			return;
-		for (k = start; k <= end; k++) {
-      Key* key = keys;
+void grabkeys(void) {
+  updatenumlockmask();
+  {
+    unsigned int j, k;
+    unsigned int modifiers[] = {0, LockMask, numlockmask,
+                                numlockmask | LockMask};
+    int start, end, skip;
+    KeySym *syms;
+
+    XUngrabKey(dpy, AnyKey, AnyModifier, root);
+    XDisplayKeycodes(dpy, &start, &end);
+    syms = XGetKeyboardMapping(dpy, start, end - start + 1, &skip);
+    if (!syms)
+      return;
+    for (k = start; k <= end; k++) {
+      Key *key = keys;
       while (key != NULL) {
         /* skip modifier codes, we do that ourselves */
         if (key->keysym == syms[(k - start) * skip])
           for (j = 0; j < LENGTH(modifiers); j++)
-            XGrabKey(dpy, k, key->mod | modifiers[j], root, True,
-                     GrabModeAsync, GrabModeAsync);
+            XGrabKey(dpy, k, key->mod | modifiers[j], root, True, GrabModeAsync,
+                     GrabModeAsync);
         key = key->next;
       }
     }
 
     XFree(syms);
-	}
+  }
 }
 
 void
@@ -1240,10 +1309,18 @@ keypress(XEvent *e)
 
   ev = &e->xkey;
   keysym = XKeycodeToKeysym(dpy, (KeyCode)ev->keycode, 0);
-  Key *key = find_key(ev->state, keysym);
-  if (key != NULL) {
-    scm_call_0(key->func);
-  }
+
+  printf("Keypress: %u %u\n", ev->state, keysym);
+
+  SCM modifiers = scm_from_uint(ev->state);
+  SCM key = scm_from_uint(keysym);
+  SCM scm_keypress = scm_variable_ref(scm_c_lookup("keypress"));
+  scm_call_2(scm_keypress, modifiers, key);
+
+  /* Key *key = find_key(ev->state, keysym); */
+  /* if (key != NULL) { */
+  /*   scm_call_0(key->func); */
+  /* } */
 }
 
 void
@@ -1827,20 +1904,32 @@ scm_setmfact(SCM amount) {
 
 uint get_xkey(char c) {
   switch (c) {
+  case 'a': return XK_a;
   case 'b': return XK_b;
   case 'c': return XK_c;
   case 'd': return XK_d;
+  case 'e': return XK_e;
   case 'f': return XK_f;
+  case 'g': return XK_g;
   case 'h': return XK_h;
   case 'i': return XK_i;
   case 'j': return XK_j;
   case 'k': return XK_k;
   case 'l': return XK_l;
   case 'm': return XK_m;
+  case 'n': return XK_n;
+  case 'o': return XK_o;
   case 'p': return XK_p;
-  case 't': return XK_t;
   case 'q': return XK_q;
   case 'r': return XK_r;
+  case 's': return XK_s;
+  case 't': return XK_t;
+  case 'u': return XK_u;
+  case 'v': return XK_v;
+  case 'w': return XK_w;
+  case 'x': return XK_x;
+  case 'y': return XK_y;
+  case 'z': return XK_z;
 
   case '0': return XK_0;
   case '1': return XK_1;
@@ -1853,16 +1942,11 @@ uint get_xkey(char c) {
   case '8': return XK_8;
   case '9': return XK_9;
 
-  case '.':
-    return XK_period;
-  case ',':
-    return XK_comma;
-  case ' ':
-    return XK_space;
-  case '\t':
-    return XK_Tab;
-  case '\n':
-    return XK_Return;
+  case '.': return XK_period;
+  case ',': return XK_comma;
+  case ' ': return XK_space;
+  case '\t': return XK_Tab;
+  case '\n': return XK_Return;
   }
 
   return 0;
@@ -1927,6 +2011,15 @@ SCM scm_load_config() {
   return SCM_BOOL_T;
 }
 
+SCM
+scm_c_print(SCM msg) {
+  char* cstr = scm_to_locale_string(msg);
+  printf(cstr);
+  fflush(stdout);
+  free(cstr);
+  return SCM_BOOL_T;
+}
+
 void
 setup(void)
 {
@@ -1951,8 +2044,9 @@ setup(void)
   fflush(stdout);
   scm_init_guile();
 
-  scm_define_monitor();
-  scm_define_layout();
+  scm_define_type(&monitor_type, "Monitor");
+  scm_define_type(&layout_type, "Layout");
+  scm_define_type(&rule_type, "Rule");
 
   scm_c_define_gsubr("toggle-bar", 0, 0, 0, scm_togglebar);
   scm_c_define_gsubr("focus-stack", 1, 0, 0, scm_focusstack);
@@ -1985,6 +2079,8 @@ setup(void)
   scm_c_define_gsubr("selected-monitor", 0, 0, 0, scm_selmon);
   scm_c_define_gsubr("arrange", 1, 0, 0, scm_arrange);
   scm_c_define_gsubr("draw-bar", 1, 0, 0, scm_drawbar);
+  scm_c_define_gsubr("make-rule", 3, 0, 0, scm_make_rule);
+  scm_c_define_gsubr("c-print", 1, 0, 0, scm_c_print);
 
   scm_load_config();
 
@@ -2554,8 +2650,9 @@ updatesizehints(Client *c)
 void
 updatestatus(void)
 {
-	if (!gettextprop(root, XA_WM_NAME, stext, sizeof(stext)))
-		strcpy(stext, "dwm-"VERSION);
+	/* if (!gettextprop(root, XA_WM_NAME, stext, sizeof(stext))) */
+	/* 	strcpy(stext, "dwm-"VERSION); */
+  update_stext();
 	drawbar(selmon);
 }
 
