@@ -281,10 +281,15 @@
 (define main-weather (weather 43 -76))
 
 (define (bar)
-  (let* ((wrap (lambda (s) (string-append " " s " ")))
-         (current-clock (atomic-box-ref main-clock))
+  (let* ((current-clock (atomic-box-ref main-clock))
          (current-weather (atomic-box-ref main-weather)))
     (format #f " ~a | ~a "
             current-weather
             current-clock)))
+
+(future (while #t
+          ;; must sleep first to prevent accessing unintialized C members
+          (sleep 15)
+          (log "Scheme updating status\n")
+          (update-status (bar))))
 

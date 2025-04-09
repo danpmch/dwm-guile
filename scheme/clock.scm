@@ -6,11 +6,10 @@
 
 (define (run-clock c)
   (future
-   (begin
+   (while #t
      (sleep 30)
      (atomic-box-set! c
-                      (date-time-str))
-     (run-clock c))))
+                      (date-time-str)))))
 
 (define (clock)
   (let* ((box (make-atomic-box (date-time-str))))

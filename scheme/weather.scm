@@ -10,27 +10,33 @@
              (srfi srfi-1))
 
 (define (weather-get uri)
-  (receive (_ body)
+  (receive (response body)
       (http-get uri
                 #:headers '((Content-Type . "application/json")
                             (User-Agent . "guile-web-client")))
-    body))
+    (if (<= 200 (response-code response) 299)
+        body
+        #f)))
 
 (define (bytevector->json bytes)
   (let* ((json-str (bytevector->string bytes "utf8"))
          (json (json-string->scm json-str)))
     json))
 
+(define (weather-get-json uri)
+  (let ((response (weather-get uri)))
+    (if response
+        (bytevector->json response)
+        #f)))
 
 (define (get-point lat lon)
-  (let* ((response (weather-get (format #f "https://api.weather.gov/points/~a,~a" lat lon)))
-         (json (bytevector->json response)))
-    (assoc-ref json "properties")))
+  (let* ((response (weather-get-json (format #f "https://api.weather.gov/points/~a,~a" lat lon))))
+    (if response
+        (assoc-ref response "properties")
+        #f)))
 
 (define (get-forecast point)
-  (let* ((response (weather-get (assoc-ref point "forecastHourly")))
-         (json (bytevector->json response)))
-    json))
+  (weather-get-json (assoc-ref point "forecastHourly")))
 
 (define (get-periods forecast)
   (array-ref
@@ -56,10 +62,18 @@
             (sleep (* 60 60))
             (run-weather box point))))
 
+(define (run box lat lon)
+  (let ((point #f))
+    (while (not point)
+      (sleep 60)
+      (set! point (get-point lat lon)))
+    (while #t
+      (atomic-box-set! box (temperature-str point))
+      (sleep (* 60 60)))))
+
 (define (weather lat lon)
-  (let* ((point (future (get-point lat lon)))
-         (box (make-atomic-box "Temp...")))
-    (run-weather box point)
+  (let ((box (make-atomic-box "Temp")))
+    (future (run box lat lon))
     box))
 
 

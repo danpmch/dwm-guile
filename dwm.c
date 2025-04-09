@@ -418,7 +418,6 @@ static void updateclientlist(void);
 static int updategeom(void);
 static void updatenumlockmask(void);
 static void updatesizehints(Client *c);
-static void updatestatus(void);
 static void updatetitle(Client *c);
 static void updatewindowtype(Client *c);
 static void updatewmhints(Client *c);
@@ -454,11 +453,12 @@ void scm_define_layout();
 SCM scm_from_layout(Layout *l);
 Layout *scm_to_layout(SCM l);
 SCM scm_make_layout(SCM scm_symbol, SCM scm_func);
+SCM scm_updatestatus();
 
     /* variables */
     static const char broken[] = "broken";
 #define STEXT_LENGTH 256
-static char stext[STEXT_LENGTH];
+static char stext[STEXT_LENGTH] = { 0 };
 static int screen;
 static int sw, sh; /* X display screen geometry width, height */
 static int bh;     /* bar height */
@@ -948,9 +948,7 @@ dirtomon(int dir)
 	return m;
 }
 
-void update_stext() {
-  SCM scm_bar = scm_variable_ref(scm_c_lookup("bar"));
-  SCM scm_bar_text = scm_call_0(scm_bar);
+void update_stext(SCM scm_bar_text) {
   char* bar_text = scm_to_locale_string(scm_bar_text);
   int total_bar_text = strlen(bar_text);
   for (int i = 0; i < STEXT_LENGTH; i++) {
@@ -966,21 +964,21 @@ void update_stext() {
 void
 drawbar(Monitor *m)
 {
-	int x, w, tw = 0;
-	int boxs = drw->fonts->h / 9;
-	int boxw = drw->fonts->h / 6 + 2;
-	unsigned int i, occ = 0, urg = 0;
-	Client *c;
+  int x, w, tw = 0;
+  int boxs = drw->fonts->h / 9;
+  int boxw = drw->fonts->h / 6 + 2;
+  unsigned int i, occ = 0, urg = 0;
+  Client *c;
 
-	if (!m->showbar)
-		return;
+  if (!m->showbar)
+    return;
 
-	/* draw status first so it can be overdrawn by tags later */
-	if (m == selmon) { /* status is only drawn on selected monitor */
-		drw_setscheme(drw, scheme[SchemeNorm]);
-		tw = TEXTW(stext) - lrpad + 2; /* 2px right padding */
-		drw_text(drw, m->ww - tw, 0, tw, bh, 0, stext, 0);
-	}
+  /* draw status first so it can be overdrawn by tags later */
+  if (m == selmon) { /* status is only drawn on selected monitor */
+    drw_setscheme(drw, scheme[SchemeNorm]);
+    tw = TEXTW(stext) - lrpad + 2; /* 2px right padding */
+    drw_text(drw, m->ww - tw, 0, tw, bh, 0, stext, 0);
+  }
 
 	for (c = m->clients; c; c = c->next) {
 		occ |= c->tags;
@@ -1549,9 +1547,7 @@ propertynotify(XEvent *e)
 	Window trans;
 	XPropertyEvent *ev = &e->xproperty;
 
-	if ((ev->window == root) && (ev->atom == XA_WM_NAME))
-		updatestatus();
-	else if (ev->state == PropertyDelete)
+	if (ev->state == PropertyDelete)
 		return; /* ignore */
 	else if ((c = wintoclient(ev->window))) {
 		switch(ev->atom) {
@@ -2081,6 +2077,7 @@ setup(void)
   scm_c_define_gsubr("draw-bar", 1, 0, 0, scm_drawbar);
   scm_c_define_gsubr("make-rule", 3, 0, 0, scm_make_rule);
   scm_c_define_gsubr("c-print", 1, 0, 0, scm_c_print);
+  scm_c_define_gsubr("update-status", 1, 0, 0, scm_updatestatus);
 
   scm_load_config();
 
@@ -2147,7 +2144,6 @@ setup(void)
         fflush(stdout);
         /* init bars */
         updatebars();
-        updatestatus();
 
         printf("initing netwmcheck...\n");
         fflush(stdout);
@@ -2647,13 +2643,19 @@ updatesizehints(Client *c)
 	c->hintsvalid = 1;
 }
 
-void
-updatestatus(void)
-{
-	/* if (!gettextprop(root, XA_WM_NAME, stext, sizeof(stext))) */
-	/* 	strcpy(stext, "dwm-"VERSION); */
-  update_stext();
-	drawbar(selmon);
+SCM
+scm_updatestatus(SCM scm_bar_text) {
+  puts("scm_updatestatus");
+  fflush(stdout);
+  update_stext(scm_bar_text);
+
+  puts("drawing bar");
+  fflush(stdout);
+  drawbar(selmon);
+
+  puts("done with bar");
+  fflush(stdout);
+  return SCM_BOOL_T;
 }
 
 void
